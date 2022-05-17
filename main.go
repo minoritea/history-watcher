@@ -77,7 +77,7 @@ func (watcher *watcher) watch() error {
 				return err
 			}
 
-			if strings.HasPrefix(line.Text, "#") {
+			if strings.HasPrefix(line.Text, "#") || line.Text == "" {
 				continue
 			}
 
