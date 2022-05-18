@@ -5,6 +5,7 @@ go 1.13
 require (
 	github.com/fsnotify/fsnotify v1.4.9 // indirect
 	github.com/hpcloud/tail v1.0.0
+	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/wangjia184/sortedset v0.0.0-20210325043434-64dd27e173e2
 	go.etcd.io/bbolt v1.3.6
 	golang.org/x/sys v0.0.0-20210326220804-49726bf1d181 // indirect

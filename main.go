@@ -2,9 +2,11 @@ package main
 
 import (
 	"github.com/hpcloud/tail"
+	"github.com/kelseyhightower/envconfig"
 	"github.com/wangjia184/sortedset"
 	"go.etcd.io/bbolt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,13 +14,21 @@ import (
 	"sync"
 )
 
+type Config struct {
+	Host   string `default:"127.0.0.1"`
+	Port   string `default:"14444"`
+	Token  string
+	DbFile string
+	Poll   bool
+}
+
 type watcher struct {
-	token *string
-	db    *bbolt.DB
+	db *bbolt.DB
 	sync.RWMutex
 	*sortedset.SortedSet
 	lastIndex int
 	errch     chan error
+	Config
 }
 
 var bucketName = []byte("HISTORY_WATCHER")
@@ -50,12 +60,24 @@ func (watcher *watcher) load() error {
 }
 
 func (watcher *watcher) watch() error {
-	err := watcher.load()
+	homedir, err := os.UserHomeDir()
 	if err != nil {
 		return err
 	}
 
-	t, err := tail.TailFile(filepath.Join(os.Getenv("HOME"), ".bash_history"), tail.Config{ReOpen: true, Follow: true})
+	err = watcher.load()
+	if err != nil {
+		return err
+	}
+
+	t, err := tail.TailFile(
+		filepath.Join(homedir, ".bash_history"),
+		tail.Config{
+			ReOpen: true,
+			Follow: true,
+			Poll:   watcher.Poll,
+		},
+	)
 	if err != nil {
 		return err
 	}
@@ -98,28 +120,22 @@ func (watcher *watcher) watch() error {
 	}
 }
 
-func newWatcher() *watcher {
+func newWatcher(conf Config) *watcher {
 	var (
-		db    *bbolt.DB
-		token *string
+		db *bbolt.DB
 	)
-	dbpath := os.Getenv("HW_DBFILE")
-	if dbpath != "" {
+	if conf.DbFile != "" {
 		var err error
-		db, err = bbolt.Open(dbpath, 0600, nil)
+		db, err = bbolt.Open(conf.DbFile, 0600, nil)
 		if err != nil {
 			log.Println(err)
 			db = nil
 		}
 	}
 
-	tokenStr := os.Getenv("HW_TOKEN")
-	if tokenStr != "" {
-		token = &tokenStr
-	}
 	return &watcher{
+		Config:    conf,
 		db:        db,
-		token:     token,
 		SortedSet: sortedset.New(),
 		errch:     make(chan error),
 	}
@@ -132,14 +148,14 @@ type streamWriter interface {
 }
 
 func (watcher *watcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if watcher.token != nil {
+	if watcher.Token != "" {
 		authHeader := r.Header.Get("authorization")
 		if !strings.HasPrefix(authHeader, "Bearer ") {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
 		token := strings.TrimPrefix(authHeader, "Bearer ")
-		if *watcher.token != token {
+		if watcher.Token != token {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -170,21 +186,30 @@ func (watcher *watcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func main() {
-	watcher := newWatcher()
-
-	ip := os.Getenv("HW_IP")
-	if ip == "" {
-		ip = "127.0.0.1"
+func run() error {
+	var conf Config
+	err := envconfig.Process("hw", &conf)
+	if err != nil {
+		return err
 	}
-
-	port := os.Getenv("HW_PORT")
-	if port == "" {
-		port = "14444"
-	}
-
-	go func() { watcher.errch <- http.ListenAndServe(ip+":"+port, watcher) }()
+	log.Printf(
+		"bind_address=%s:%s, db_file=%s, token_authentication_enabled=%t, polling=%t",
+		conf.Host, conf.Port,
+		conf.DbFile,
+		conf.Token != "",
+		conf.Poll,
+	)
+	watcher := newWatcher(conf)
+	go func() { watcher.errch <- http.ListenAndServe(net.JoinHostPort(conf.Host, conf.Port), watcher) }()
 	if err := watcher.watch(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func main() {
+	err := run()
+	if err != nil {
 		log.Fatal(err)
 	}
 }
