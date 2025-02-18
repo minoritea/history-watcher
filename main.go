@@ -1,23 +1,24 @@
 /*
-    history-watcher
-    Copyright (C) 2018 Minori Tokuda
+history-watcher
+Copyright (C) 2018 Minori Tokuda
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    any later version.
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package main
 
 import (
+	"fmt"
 	"github.com/hpcloud/tail"
 	"github.com/kelseyhightower/envconfig"
 	"github.com/wangjia184/sortedset"
@@ -31,12 +32,91 @@ import (
 	"sync"
 )
 
+func expandTilda(path string) string {
+	rest, hasTilde := strings.CutPrefix(path, "~")
+	if !hasTilde {
+		return path
+	}
+	homedir, err := os.UserHomeDir()
+	if err != nil {
+		panic(fmt.Errorf("failed to get home directory: %v", err))
+	}
+	return filepath.Join(homedir, rest)
+}
+
+type HistoryFileFormat string
+
+const (
+	Bash  HistoryFileFormat = "bash"
+	Zsh                     = "zsh"
+	ZshE                    = "zsh_extended"
+	ZshE2                   = "zshe"
+)
+
+func (h HistoryFileFormat) DecodeLine(line string) string {
+	switch h {
+	case Bash:
+		if strings.HasPrefix(line, "#") {
+			return ""
+		}
+		return line
+	case Zsh:
+		return line
+	case ZshE, ZshE2:
+		return strings.SplitN(line, ";", 2)[1]
+	default:
+		panic(fmt.Errorf("unknown history file format: %s", h))
+	}
+}
+
+func (h HistoryFileFormat) Validate() error {
+	switch h {
+	case Bash, Zsh, ZshE, ZshE2:
+		return nil
+	default:
+		return fmt.Errorf("unknown history file format: %s", h)
+	}
+}
+
+func (h HistoryFileFormat) String() string {
+	switch h {
+	case ZshE2:
+		return "zsh_extended"
+	default:
+		return string(h)
+	}
+}
+
+func (h HistoryFileFormat) DefaultPath() string {
+	switch h {
+	case Bash:
+		return "~/.bash_history"
+	case Zsh, ZshE, ZshE2:
+		return "~/.zsh_history"
+	default:
+		panic(fmt.Errorf("unknown history file format: %s", h))
+	}
+}
+
 type Config struct {
-	Host   string `default:"127.0.0.1"`
-	Port   string `default:"14444"`
-	Token  string
-	DbFile string
-	Poll   bool
+	Host           string `default:"127.0.0.1"`
+	Port           string `default:"14444"`
+	Token          string
+	DBFile         string            `default:"~/.cache/history-watcher.db"`
+	HistFile       string            `default:"default"`
+	HistFileFormat HistoryFileFormat `envconfig:"HW_HISTFILE_FORMAT" default:"bash"`
+	Poll           bool
+}
+
+func (c Config) HistFilePath() string {
+	if c.HistFile == "default" {
+		return c.HistFileFormat.DefaultPath()
+	}
+	return c.HistFile
+}
+
+func (c Config) Validate() error {
+	return c.HistFileFormat.Validate()
 }
 
 type watcher struct {
@@ -77,18 +157,13 @@ func (watcher *watcher) load() error {
 }
 
 func (watcher *watcher) watch() error {
-	homedir, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-
-	err = watcher.load()
+	err := watcher.load()
 	if err != nil {
 		return err
 	}
 
 	t, err := tail.TailFile(
-		filepath.Join(homedir, ".bash_history"),
+		expandTilda(watcher.HistFilePath()),
 		tail.Config{
 			ReOpen: true,
 			Follow: true,
@@ -116,13 +191,14 @@ func (watcher *watcher) watch() error {
 				return err
 			}
 
-			if strings.HasPrefix(line.Text, "#") || line.Text == "" {
+			decoded := watcher.HistFileFormat.DecodeLine(line.Text)
+			if decoded == "" {
 				continue
 			}
 
 			if watcher.db != nil {
 				err := watcher.db.Update(func(tx *bbolt.Tx) error {
-					return tx.Bucket(bucketName).Put([]byte(line.Text), []byte{0x0})
+					return tx.Bucket(bucketName).Put([]byte(decoded), []byte{0x0})
 				})
 				if err != nil {
 					return err
@@ -131,7 +207,7 @@ func (watcher *watcher) watch() error {
 
 			watcher.Lock()
 			watcher.lastIndex++
-			watcher.AddOrUpdate(line.Text, sortedset.SCORE(watcher.lastIndex), struct{}{})
+			watcher.AddOrUpdate(decoded, sortedset.SCORE(watcher.lastIndex), struct{}{})
 			watcher.Unlock()
 		}
 	}
@@ -141,9 +217,9 @@ func newWatcher(conf Config) *watcher {
 	var (
 		db *bbolt.DB
 	)
-	if conf.DbFile != "" {
+	if conf.DBFile != "" && conf.DBFile != "-" {
 		var err error
-		db, err = bbolt.Open(conf.DbFile, 0600, nil)
+		db, err = bbolt.Open(expandTilda(conf.DBFile), 0600, nil)
 		if err != nil {
 			log.Println(err)
 			db = nil
@@ -205,17 +281,32 @@ func (watcher *watcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func run() error {
 	var conf Config
-	err := envconfig.Process("hw", &conf)
-	if err != nil {
+	if err := envconfig.Process("hw", &conf); err != nil {
+		return err
+	}
+	if err := conf.Validate(); err != nil {
 		return err
 	}
 	log.Printf(
-		"bind_address=%s:%s, db_file=%s, token_authentication_enabled=%t, polling=%t",
-		conf.Host, conf.Port,
-		conf.DbFile,
-		conf.Token != "",
-		conf.Poll,
+		"target_history_file= %s (format= %s)",
+		conf.HistFilePath(),
+		conf.HistFileFormat,
 	)
+	log.Printf(
+		"bind_address= %s:%s",
+		conf.Host,
+		conf.Port,
+	)
+	log.Printf(
+		"db_file= %s",
+		conf.DBFile,
+	)
+	if conf.Token != "" {
+		log.Printf("token_authentication_enabled")
+	}
+	if conf.Poll {
+		log.Printf("polling_enabled")
+	}
 	watcher := newWatcher(conf)
 	go func() { watcher.errch <- http.ListenAndServe(net.JoinHostPort(conf.Host, conf.Port), watcher) }()
 	if err := watcher.watch(); err != nil {
