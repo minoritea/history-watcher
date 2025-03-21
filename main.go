@@ -63,14 +63,13 @@ func (h HistoryFileFormat) DecodeLine(line string) string {
 	case Zsh:
 		return line
 	case ZshE, ZshE2:
-		switch hist := strings.SplitN(line, ";", 2); len(hist) {
-		case 1:
-			return hist[0]
-		case 2:
-			return hist[1]
-		default:
+		if strings.HasPrefix(line, ":") {
+			if hist := strings.SplitN(line, ";", 2); len(hist) == 2 {
+				return hist[1]
+			}
 			return ""
 		}
+		return line
 	default:
 		panic(fmt.Errorf("unknown history file format: %s", h))
 	}
