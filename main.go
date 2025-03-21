@@ -63,7 +63,14 @@ func (h HistoryFileFormat) DecodeLine(line string) string {
 	case Zsh:
 		return line
 	case ZshE, ZshE2:
-		return strings.SplitN(line, ";", 2)[1]
+		switch hist := strings.SplitN(line, ";", 2); len(hist) {
+		case 1:
+			return hist[0]
+		case 2:
+			return hist[1]
+		default:
+			return ""
+		}
 	default:
 		panic(fmt.Errorf("unknown history file format: %s", h))
 	}
@@ -174,6 +181,7 @@ func (watcher *watcher) watch() error {
 		return err
 	}
 
+	var previousLine string
 	for {
 		select {
 		case <-t.Dead():
@@ -195,6 +203,13 @@ func (watcher *watcher) watch() error {
 			if decoded == "" {
 				continue
 			}
+
+			if beforeLineBreak, found := strings.CutSuffix(decoded, "\\"); found {
+				previousLine += beforeLineBreak
+				continue
+			}
+
+			decoded, previousLine = previousLine+decoded, ""
 
 			if watcher.db != nil {
 				err := watcher.db.Update(func(tx *bbolt.Tx) error {
