@@ -205,11 +205,13 @@ func (watcher *watcher) watch() error {
 			}
 
 			if beforeLineBreak, found := strings.CutSuffix(decoded, "\\"); found {
-				previousLine += beforeLineBreak
+				previousLine += beforeLineBreak + ";"
 				continue
 			}
 
-			decoded, previousLine = previousLine+decoded, ""
+			if previousLine != "" {
+				decoded, previousLine = previousLine+decoded, ""
+			}
 
 			if watcher.db != nil {
 				err := watcher.db.Update(func(tx *bbolt.Tx) error {
